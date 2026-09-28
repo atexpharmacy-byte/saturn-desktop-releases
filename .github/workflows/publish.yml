@@ -1,0 +1,50 @@
+name: Publish release
+
+# Push a branch named upload/<anything> containing upload/latest.yml, upload/NOTES.md,
+# upload/<installer>.exe.blockmap and the installer split into upload/<installer>.exe.part*
+# (git can't hold files over 100 MB). This job rebuilds the installer, checks its sha512
+# against latest.yml, publishes the GitHub Release (which SATURN auto-update reads),
+# then deletes the upload branch.
+on:
+  push:
+    branches: ['upload/**']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild installer and verify checksum
+        id: asm
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upload
+          VERSION=$(awk '/^version:/{print $2}' latest.yml)
+          EXE=$(awk '/^path:/{print $2}' latest.yml)
+          cat $(ls "$EXE".part* | sort) > "$EXE"
+          WANT=$(awk '/^sha512:/{print $2}' latest.yml)
+          GOT=$(openssl dgst -sha512 -binary "$EXE" | base64 -w0)
+          if [ "$WANT" != "$GOT" ]; then echo "Checksum mismatch"; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd upload
+          V=${{ steps.asm.outputs.version }}
+          EXE=${{ steps.asm.outputs.exe }}
+          gh release delete "v$V" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$V" "$EXE" "$EXE.blockmap" latest.yml \
+            --repo "$GITHUB_REPOSITORY" --target main --latest \
+            --title "SATURN Desktop $V" --notes-file NOTES.md
+      - name: Delete upload branch
+        if: success()
+        shell: bash
+        run: git push origin --delete "$GITHUB_REF_NAME"
